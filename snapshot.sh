@@ -18,9 +18,11 @@ function print_help {
     echo "-s,--snapshot-size Use a specific volume size (in GiB) for this snapshot. (default: 50)"
     echo "-R,--instance-role Name of existing IAM role for created EC2 instance. (default: Create on launching)"
     echo "-q,--quiet Suppress all outputs and output generated snapshot ID only. (default: false)"
+    echo "-p,--platform Set platform for the images. (default: amd64)"
 }
 
 QUIET=false
+PLATFORM="amd64"
 
 function log() {
     if [ "$QUIET" = false ]; then
@@ -89,6 +91,11 @@ while [[ $# -gt 0 ]]; do
             QUIET=true
             shift
             ;;
+        -p|--platform)
+            PLATFORM=$2
+            shift
+            shift
+            ;;
         *)    # unknown option
             POSITIONAL+=("$1") # save it in an array for later
             shift # past argument
@@ -107,7 +114,7 @@ INSTANCE_TYPE=${INSTANCE_TYPE:-m5.large}
 INSTANCE_ROLE=${INSTANCE_ROLE:-NONE}
 ENCRYPT=${ENCRYPT:-NONE}
 KMS_ID=${KMS_ID:-NONE}
-SNAPSHOT_SIZE=${SNAPSHOT_SIZE:-50}
+SNAPSHOT_SIZE=${SNAPSHOT_SIZE:-80}
 SCRIPTPATH=$(dirname "$0")
 CTR_CMD="apiclient exec admin sheltie ctr -a /run/containerd/containerd.sock -n k8s.io"
 
@@ -167,29 +174,24 @@ for IMG in "${IMAGES_LIST[@]}"
 do
     ECR_REGION=$(echo $IMG | sed -n "s/^[0-9]*\.dkr\.ecr\.\([a-z1-9-]*\)\.amazonaws\.com.*$/\1/p")
     [ -n "$ECR_REGION" ] && ECRPWD="--u AWS:"$(aws ecr get-login-password --region $ECR_REGION) || ECRPWD=""
-    for PLATFORM in amd64 arm64
+    log "Pulling $IMG - $PLATFORM ... "
+    COMMAND="$CTR_CMD images pull --label io.cri-containerd.image=managed --platform $PLATFORM $IMG $ECRPWD "
+    CMDID=$(aws ssm send-command --instance-ids $INSTANCE_ID \
+        --document-name "AWS-RunShellScript" --comment "Pull Images" \
+        --parameters commands="$COMMAND" \
+        --query "Command.CommandId" --output text)
+    until aws ssm wait command-executed --command-id "$CMDID" --instance-id $INSTANCE_ID &> /dev/null && log "$IMG - $PLATFORM pulled. "
     do
-        log "Pulling $IMG - $PLATFORM ... "
-        COMMAND="$CTR_CMD images pull --label io.cri-containerd.image=managed --platform $PLATFORM $IMG $ECRPWD "
-        #echo $COMMAND
-        CMDID=$(aws ssm send-command --instance-ids $INSTANCE_ID \
-            --document-name "AWS-RunShellScript" --comment "Pull Images" \
-            --parameters commands="$COMMAND" \
-            --query "Command.CommandId" --output text)
-        until aws ssm wait command-executed --command-id "$CMDID" --instance-id $INSTANCE_ID &> /dev/null && log "$IMG - $PLATFORM pulled. "
-        do
-            sleep 5
-            if [ "$(aws ssm get-command-invocation --command-id $CMDID --instance-id $INSTANCE_ID --output text --query Status)" == "Failed" ]; then
-                REASON=$(aws ssm get-command-invocation --command-id $CMDID --instance-id $INSTANCE_ID --output text --query StandardOutputContent)
-                logerror "Image $IMG pulling failed with following output: "
-                logerror $REASON
-                cleanup $CFN_STACK_NAME
-                exit 1
-            fi
-        done
+        sleep 5
+        if [ "$(aws ssm get-command-invocation --command-id $CMDID --instance-id $INSTANCE_ID --output text --query Status)" == "Failed" ]; then
+            REASON=$(aws ssm get-command-invocation --command-id $CMDID --instance-id $INSTANCE_ID --output text --query StandardOutputContent)
+            logerror "Image $IMG pulling failed with following output: "
+            logerror $REASON
+            cleanup $CFN_STACK_NAME
+            exit 1
+        fi
     done
 done
-
 
 # stop EC2
 log "[6/8] Stopping instance ... "
