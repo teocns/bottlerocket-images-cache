@@ -201,7 +201,24 @@ aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" > /dev/null && log "
 # create EBS snapshot
 log "[7/8] Creating snapshot ... "
 DATA_VOLUME_ID=$(aws ec2 describe-instances  --instance-id $INSTANCE_ID --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='/dev/xvdb'].Ebs.VolumeId" --output text)
-SNAPSHOT_ID=$(aws ec2 create-snapshot --volume-id $DATA_VOLUME_ID --description "Bottlerocket Data Volume snapshot with $IMAGES" --query "SnapshotId" --output text)
+function create_snapshot_description() {
+    local images="$1"
+    local max_length=255
+    local description="Bottlerocket Data Volume snapshot with cached images"
+    local full_description="$description: $images"
+
+    if [ ${#full_description} -gt $max_length ]; then
+        local allowed_length=$(($max_length - ${#description} - 3))  # 3 for ellipsis
+        local truncated_images="${images:0:$allowed_length}..."
+        echo "$description: $truncated_images"
+    else
+        echo "$full_description"
+    fi
+}
+
+SNAPSHOT_DESCRIPTION=$(create_snapshot_description "$IMAGES")
+
+SNAPSHOT_ID=$(aws ec2 create-snapshot --volume-id $DATA_VOLUME_ID --description "$SNAPSHOT_DESCRIPTION" --query "SnapshotId" --output text)
 until aws ec2 wait snapshot-completed --snapshot-ids "$SNAPSHOT_ID" &> /dev/null && log "Snapshot $SNAPSHOT_ID generated."
 do
     sleep 5
@@ -217,3 +234,4 @@ log "All done! Created snapshot in $AWS_DEFAULT_REGION: $SNAPSHOT_ID"
 if [ $QUIET = true ]; then
     echo "$SNAPSHOT_ID"
 fi
+
